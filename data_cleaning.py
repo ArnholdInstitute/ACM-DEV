@@ -7,7 +7,7 @@ Saves the data as a hdf5 file
 """
 import numpy as np
 import pandas as pd
-import cPickle
+import pickle
 import h5py
 from osgeo import gdal, ogr
 import pyproj
@@ -16,7 +16,6 @@ import shapely.ops as ops
 from rtree import index 
 from geopandas import GeoDataFrame
 from functools import partial
-from sklearn.feature_extraction.image import extract_patches_2d
 from multiprocessing import Pool
 import parmap
 import os, sys
@@ -25,10 +24,11 @@ import os, sys
 def point_wrapper(x):
     """
     A wrapper to use the point function in parallel 
+    x[0] : longitude
+    x[1]: latitude
     """
     return Point(x[0], x[1])
 
- 
 def pixel_to_coordinates(column, row, geotransform):
     """
 
@@ -63,7 +63,7 @@ def array_wrapper(col, row, array):
     """
     return array[row][col]
 
-def adder(x):
+def adder(x, y):
     """
    
     Wrapper for parallelisation
@@ -71,8 +71,7 @@ def adder(x):
     Takes the north west corner of an image and returns the centroid
     
     """
-    return x + 16 
-
+    return x + y 
 
 class database_constructor:
     """
@@ -86,9 +85,9 @@ class database_constructor:
     """
     def __init__(
             self, census_folder_loc, census_shapefile,
-            sat_folder_loc, save_folder_loc, state_name, 
-            state_code, year, channels, file_size, sample_rate, obs_size, 
-            processes, step):
+	    sat_folder_loc, save_folder_loc, country_code, 
+            year, channels, sample_rate, obs_size, resolution,
+	    processes, step):
         """
         Initialises the class
         Inputs:
@@ -99,38 +98,34 @@ class database_constructor:
             urban_shapefile: name of shapefile
             sat_folder_loc: location of satellite images 
             save_folder_loc: location of folder to save data 
-            state_name: The state name 
-            state_code: Two letter state code  
-            (int)
+            country_code: The state name 
             year: year of investigation string  
             (list of str)
             channels: bandwidths used in estimation list of strings
-            (int)
-            file_size: number of image samples per file 
             (float)
             sample_rate: proportion of images sampled 
             (int)
             obs_size: the length/width of each observation 
+            resolution: resolution of sat images
         """
         self.census_folder_loc = census_folder_loc
         self.census_shapefile = census_shapefile
         self.sat_folder_loc = sat_folder_loc
         self.save_folder_loc = save_folder_loc
-        self.state_name = state_name
-        self.state_code = state_code
+        self.country_code = country_code
         self.year = year
         self.channels = channels
-        self.file_size = file_size
         self.sample_rate = sample_rate
         self.obs_size = obs_size
+        self.resolution = resolution
         self.processes = processes
         self.step = step
         if not os.path.exists( self.census_folder_loc + '/' 
                                 + self.census_shapefile ):
             sys.exit('Error: File ' + self.census_folder_loc + '/' 
                     + self.census_shapefile + ' does not exist')
-        self.filename = self.sat_folder_loc + self.state_name + \
-                       '_' + self.year + '_B1.tif'
+        self.filename = self.sat_folder_loc + self.country_code + \
+	'_' + str(self.resolution) + '_B1.tif'
         # testing whether files exist
         if not os.path.exists( self.filename ):
                 sys.exit('Error: File ' + self.filename + 
@@ -173,22 +168,52 @@ class database_constructor:
             pixelPoint_db.append([temp_polygon, temp_pop, pixel.x, pixel.y])
         return GeoDataFrame(pixelPoint_db)
 
+    def crop_image(self):
+        """
+        Crops the image to remove a lot of the empty space
+        """
+        # getting image
+        x = self.satellite_gdal.GetRasterBand(1)
+        x = x.ReadAsArray() 
+        # how much of array is masked
+        print '%.1f%% masked' % (np.isnan(x).sum() * 100.0 / x.size)
+        # cropping top off 
+        i = 0
+        while np.isnan(x[i,:]).sum() == len(x[i,:]): i += 1
+        self.row_min = i
+        # cropping off bottom
+        i = len(x[:, 0]) - 1
+        while np.isnan(x[i,:]).sum() == len(x[i,:]): i -= 1
+        self.row_max = i
+        # cropping left off 
+        i = 0
+        while np.isnan(x[:, i]).sum() == len(x[:, i]): i += 1
+        self.col_min = i
+        # cropping off bottom
+        i = len(x[0, :]) - 1
+        while np.isnan(x[:, i]).sum() == len(x[:, i]): i -= 1
+        self.col_max = i
+        del x
+        print '(Lat) Row min: ', self.row_min
+        print '(Lon) Col min: ', self.col_min
+
     def get_location(self):
         """
 
         Extracts the location of each pixel in the satellite image
 
         """
-        self.ncols = self.satellite_gdal.RasterXSize / 2
-        self.nrows = self.satellite_gdal.RasterYSize / 2
+	self.ncols = self.row_max - self.row_min
+        # self.satellite_gdal.RasterXSize 
+        self.nrows = self.col_max - self.col_min
+        # self.satellite_gdal.RasterYSize 
         self.length_df = self.nrows * self.ncols
         print 'Columns, rows', self.ncols, self.nrows
         cols_grid, rows_grid = np.meshgrid(
-                    range(0, self.ncols), 
-                    range(0, self.nrows))
+                    range(self.col_min, self.col_max), 
+                    range(self.row_min, self.row_max))
         self.cols_grid = cols_grid.flatten()
         self.rows_grid = rows_grid.flatten()
-        print 'Checking the meshgrid procedure works'
         # getting a series of lat lon points for each pixel
         self.geotransform = self.satellite_gdal.GetGeoTransform()
         print 'Getting locations'
@@ -197,11 +222,14 @@ class database_constructor:
                         zip(self.cols_grid, self.rows_grid), 
                         self.geotransform,
                         processes = self.processes))
+        print 'NW corner: ', self.location_series[0]
+        print 'SE corner: ', self.location_series[-1]
         print 'Converting to Points'
         pool = Pool(self.processes)
         self.location_series = pool.map(
                         point_wrapper, 
                         self.location_series)
+        print 'NW corner: ', self.location_series[0]
 
 
     def image_slicer(self, image):
@@ -217,8 +245,8 @@ class database_constructor:
         self.patches = []
         self.indices = []
         if len(image.shape) == 2:
-            for y in range(0, self.nrows - self.obs_size, self.step):
-                for x in range(0, self.ncols - self.obs_size, self.step):
+            for y in range(0, self.nrows, self.step):
+                for x in range(0, self.ncols, self.step):
                     mx = min(x+self.obs_size, self.ncols)
                     my = min(y+self.obs_size, self.nrows)
                     tile = image[ y: my, x: mx ]
@@ -261,18 +289,25 @@ class database_constructor:
         """
         data = []
         count = 0
+	self.crop_image()
         self.get_location()
         for extension in self.channels:
-            self.filename = self.sat_folder_loc + self.state_name + \
-                        '_' + self.year + '_' + extension + '.tif'
+		self.filename = self.sat_folder_loc + self.country_code + \
+                        '_' + str(self.resolution) + '_' + extension + '.tif'
             # testing whether files exist
             if not os.path.exists( self.filename ):
                 sys.exit('Error: File ' + self.filename + 
                         ' does not exist')
             # getting data
             print 'Loading bandwidth', extension
+            self.satellite_gdal = gdal.Open(self.filename)
             band = self.satellite_gdal.GetRasterBand(1)
-            band_array = band.ReadAsArray()[0:self.nrows, 0:self.ncols]
+            band_array = band.ReadAsArray(
+                    )[self.row_min:self.row_max, 
+                            self.col_min:self.col_max]
+            band_array = np.nan_to_num(band_array)
+            # sanity check that we're loading different channels
+            print 'Mean of bandwidth: ', band_array.mean()
             data.append(band_array.flatten())
         data = np.array(data)
         self.df_image = GeoDataFrame({'location': self.location_series})
@@ -295,28 +330,28 @@ class database_constructor:
         print 'Census data loaded'
         # It turns out the earth isn't flat 
         # Getting area in km**2 
-        print 'Calculating area'
-        area_sq_degrees = self.df_census['geometry'] 
-        area_sq_km = [] 
-        for region in area_sq_degrees: 
-            geom_area = ops.transform(
-                    partial(
-                        pyproj.transform,
-                        # projection GSCNAD83
-                        # southern WA EPSG:2286
-                        pyproj.Proj(init='EPSG:4326'), 
-                        pyproj.Proj(
-                            proj='aea', 
-                            lat1=region.bounds[1], 
-                            lat2=region.bounds[3]
-                            )
-                        ), 
-                    region) 
-            area = geom_area.area / 1000000.0  #convert m2 to km2
-            area_sq_km.append( area )
-        self.df_census['area'] = area_sq_km
-        self.df_census['density'] = \
-                self.df_census['POP10'] / self.df_census['area']
+        #print 'Calculating area'
+        #area_sq_degrees = self.df_census['geometry'] 
+        #area_sq_km = [] 
+        #for region in area_sq_degrees: 
+        #    geom_area = ops.transform(
+        #            partial(
+        #                pyproj.transform,
+        #                # projection GSCNAD83
+        #                # southern WA EPSG:2286
+        #                pyproj.Proj(init='EPSG:4326'), 
+        #                pyproj.Proj(
+        #                    proj='aea', 
+        #                    lat1=region.bounds[1], 
+        #                    lat2=region.bounds[3]
+        #                    )
+        #                ), 
+        #            region) 
+        #    area = geom_area.area / 1000000.0  #convert m2 to km2
+        #    area_sq_km.append( area )
+        #self.df_census['area'] = area_sq_km
+        self.df_census['density'] = self.df_census['POPDENS']
+        #        self.df_census['POP10'] / self.df_census['area']
         print 'Area calculated'
 
     def join_sat_census(self):
@@ -352,52 +387,38 @@ class database_constructor:
         self.pop_array = self.df_image['pop_density'].fillna(0)
         self.pop_array = np.array(
                 self.pop_array).reshape((self.nrows, self.ncols))
-        print 'extract patches'
+        print 'Extracting population patches'
         self.image_slicer(self.pop_array)
-        print 'get locations for individual frames'
-        pool = Pool(self.processes)
-        cols_grid = pool.map(adder, self.indices[:,0])
-        rows_grid = pool.map(adder, self.indices[:,1])
-        print 'Max of cols grid after slicing:',  max(cols_grid)
-        print 'Max of rows grid after slicing:',  max(rows_grid)
-        self.frame_location_series = parmap.starmap(
-                pixel_to_coordinates,
-                zip(cols_grid, rows_grid), self.geotransform, 
-                processes=self.processes)
-        print 'converting locations to Points'
-        self.frame_location_series = \
-                pool.map(Point, self.frame_location_series)
         pop_count = np.array([np.mean(patch) for patch in self.patches])
         self.df_sample = pd.DataFrame(pop_count, columns=['pop_ave'])
-        # Getting the locations
-        self.df_sample['location'] = self.frame_location_series
+	#print 'get locations for individual frames'
+        #pool = Pool(self.processes)
+        #cols_grid = pool.map(adder, self.indices[:,0])
+        #rows_grid = pool.map(adder, self.indices[:,1])
+        #print 'Max of cols grid after slicing:',  max(cols_grid)
+        #print 'Max of rows grid after slicing:',  max(rows_grid)
+        #self.frame_location_series = parmap.starmap(
+        #        pixel_to_coordinates,
+        #        zip(cols_grid, rows_grid), self.geotransform, 
+        #        processes=self.processes)
+        #print 'converting locations to Points'
+        #self.frame_location_series = \
+        #        pool.map(Point, self.frame_location_series)
+        ## Getting the locations
+        #self.df_sample['location'] = self.frame_location_series
         # Creating sample weights 
-        seed  =1975
-        self.pop_mean_sample = self.df_sample.sample(
+        seed = 1975
+        self.pop_output_data = self.df_sample.sample(
                 frac=self.sample_rate,
                 replace=True,
                 weights='pop_ave',
                 random_state = seed)
-        self.sample_idx = np.array(self.pop_mean_sample.index.values)
-        # ensuring that we get some values with zero population
-        self.df_zero_sample = self.df_sample[self.df_sample['pop_ave']==0]
-        self.pop_mean_sample_zero = self.df_zero_sample.sample(
-                frac = self.sample_rate,
-                replace = True,
-                random_state = seed)
-        self.sample_idx_zero = np.array(self.pop_mean_sample_zero.index.values)
-        # combining with >0 sample
-        self.sample_idx = np.concatenate([self.sample_idx, 
-                                          self.sample_idx_zero])
-        self.pop_output_data = np.concatenate([self.pop_mean_sample, 
-                                               self.pop_mean_sample_zero]).T[0]
-        # shuffling so that we don't have the zero pop areas at end of sample
-        p = np.random.permutation(len(self.sample_idx))
-        self.sample_idx = self.sample_idx[p]
+        self.sample_idx = np.array(self.pop_output_data.index.values)
         self.pop_output_data = np.array(
-                self.pop_output_data[p]).reshape((len(self.pop_output_data),1))
+                 self.pop_output_data).reshape((
+                    len(self.pop_output_data), 1))
     
-    def sample_generator_sat(self):
+    def sample_generator_sat(self, post):
         """
         
         Constructs a sample of observations that Keras can play with 
@@ -405,49 +426,72 @@ class database_constructor:
         """
         # satellite image data
         image_array = []
-        for channel in self.channels:
-            tmp_img = np.array(
-                    self.df_image[channel]).reshape((self.nrows, self.ncols))
-            self.sample_extractor(tmp_img[:,:], axis=0)
-            image_array.append(np.array(self.image_sample))
+        if post:
+            for channel in self.channels:
+                tmp_img = np.array(
+                        self.df_image[channel]).reshape((self.nrows, self.ncols))
+                self.image_slicer(tmp_img[:,:])
+                image_array.append(np.array(self.patches))
+        else: 
+            for channel in self.channels:
+                tmp_img = np.array(
+                        self.df_image[channel]).reshape((self.nrows, self.ncols))
+                self.sample_extractor(tmp_img[:,:], axis=0)
+                image_array.append(np.array(self.image_sample))
         image_array = np.array(image_array)    
         image_array = np.swapaxes(image_array, 0, 1)
         self.image_output_data = np.array(image_array)
+
+    def index_to_lat_lon(self):
+        """
+        Converts the index of the upper left corner of the image
+        to the lat lon of the 'middle' pixel 
+        """
+        pool = Pool(self.processes)
+        cols_grid = parmap.map(adder, self.indices[:,0], 
+                16 + self.col_min, processes=self.processes)
+        rows_grid = parmap.map(adder, self.indices[:,1],
+                16 + self.row_min, processes=self.processes)
+        self.post_location_series = parmap.starmap(
+                pixel_to_coordinates,
+                zip(cols_grid, rows_grid), self.geotransform, 
+                processes=self.processes)
 
     def save_files(self):
         """
         Saves the image information
         Inputs:
         X: numpy array of image samples
-        file_size: number of image samples per file 
         save_folder_loc: location to save data
-        state_name: state you're sampling 
+        country_code: state you're sampling 
         Returns:
         Nothing, it just saves the data! 
         """
-        no_files = 1 + self.image_output_data.shape[0] / self.file_size 
-        print 'Number of files: ', no_files
         print 'Image output shape: ', self.image_output_data.shape
-        print ' file_size: ', self.file_size
-        # the count is for a non 'full' file of the size self.file_size
-        count = 0
-        print 'Number of files', no_files
-        for i in range(0, no_files):
-            # file size changes for X and y
-            temp_sat = self.image_output_data[0:self.file_size, :, :, :]
-            temp_pop = self.pop_output_data[0:self.file_size].tolist()
-            f = h5py.File(
-                    self.save_folder_loc + 'db_' + self.state_name + \
-                            '_%d.hdf5' % count, 'w')
-            f.create_dataset('features', 
-                    data = temp_sat, compression="gzip")
-            f.create_dataset('targets',
-                    data = temp_pop, compression="gzip")
-            f.close()
-            if self.file_size!=(self.image_output_data.shape[0]-1):
-                self.image_output_data = \
-                        self.image_output_data[self.file_size:, :, :, :]
-                self.pop_output_data = self.pop_output_data[self.file_size:,:]
-            count += 1
+        f = h5py.File(self.save_folder_loc + 'db_' +
+                 self.country_code + '_' + str(self.resolution) + '.hdf5', 'w')
+        f.create_dataset('features', 
+                data = self.image_output_data, 
+                compression="gzip")
+        f.create_dataset('targets',
+                data = self.pop_output_data.tolist(), 
+                compression="gzip")
+        f.close()
 
+
+    def save_files_postestimation(self):
+        """
+        Saves the images for use in the keras model
+        """
+        print 'Image output shape: ', self.image_output_data.shape
+        f = h5py.File(self.save_folder_loc + 'db_post_' +
+                 self.country_code + '_' + str(self.resolution) + '.hdf5', 'w')
+        f.create_dataset('features', 
+                data = self.image_output_data, 
+                compression="gzip")
+        f.create_dataset('locations', 
+                data = self.post_location_series, 
+                compression="gzip")
+
+        f.close()
 
