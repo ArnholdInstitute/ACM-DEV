@@ -3,9 +3,9 @@ matplotlib.use('Agg')
 import os
 os.environ['THEANO_FLAGS'] = 'device=gpu0,floatX=float32,lib.cnmem=0.85'
 import numpy as np
+import pickle
 from scipy import stats
 import h5py
-import pickle
 import matplotlib.pyplot as plt
 from keras.models import Sequential
 from keras.layers.core import Dense, Activation, Dropout, Flatten
@@ -21,22 +21,19 @@ obs_size = 32
 
 print 'Reading data'
 
-f = h5py.File('data/keras/db_Oregon_0.hdf5', 'r')
+f = h5py.File('../data/keras/db_TZ_0.hdf5', 'r')
 X_train = np.array(f['features'])
 y_train = np.array(f['targets'])
-f.close()
-
-f = h5py.File('data/keras/db_Oregon_1.hdf5', 'r')
-X_train = np.vstack((X_train, np.array(f['features'])))
-y_train = np.vstack((y_train, np.array(f['targets'])))
 f.close()
 
 # There some observations that are ocean cells have
 # have values of zero everywhere
 # I remove them here
+X_train = np.nan_to_num(X_train)
 non_zeros = [ a.any() for a in X_train[:,1,:,:]]
 X_train = X_train[np.where(non_zeros)]
 y_train = y_train[np.where(non_zeros)]
+print 'Amount of images', len(X_train)
 
 # test only do positive
 #pop_pos = [True if i > 0 else False for i in y_train]
@@ -71,7 +68,7 @@ def create_model():
     # layer one
     model.add(Convolution2D(64, 3, 3, 
 			border_mode='same',
-			input_shape = (7, obs_size, obs_size),
+			input_shape = (9, obs_size, obs_size),
                         init='he_uniform'))
     model.add(Activation('relu'))
     model.add(Convolution2D(64, 3, 3, 
@@ -281,9 +278,13 @@ def train_loop(no_epochs, learning_rates, model_weights=None):
     # save model weights
     model.save_weights(weights_path, overwrite=True)
     return model
- 
+
+datagen = ImageDataGenerator(
+        horizontal_flip=True,
+        vertical_flip=True)
+
 learning_rates = [1, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
 no_epochs = 50
-model = train_loop(no_epochs, learning_rates,model_weights='weights.hdf5')
+model = train_loop(no_epochs, learning_rates) #,model_weights='weights.hdf5')
 evaluate_model(model)
 print 'Good one. Next?'
