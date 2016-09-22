@@ -15,6 +15,7 @@ from keras.utils.io_utils import HDF5Matrix
 from keras import callbacks
 from keras.layers.advanced_activations import LeakyReLU
 from keras.optimizers import Adam, SGD
+from keras.preprocessing.image import ImageDataGenerator
 import theano
 
 obs_size = 32 
