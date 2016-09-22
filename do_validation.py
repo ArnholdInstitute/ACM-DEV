@@ -22,7 +22,7 @@ obs_size = 32				# size of image
 processes = 2               # number of CPU cores
 
 if __name__ == "__main__":
-    print 'Starting database construction'
+    print('Starting database construction')
     db = validation_constructor(census_folder_loc, census_shapefile,
             est_folder_loc, estimates, locations, 
             save_folder_loc, country_code, 
@@ -30,5 +30,5 @@ if __name__ == "__main__":
     db.import_estimates(placeholder=False)
     db.import_census_data()
     db.join_est_census()
-    print 'Database constructed'
-    print 'Good job!'
+    print('Database constructed')
+    print('Good job!')
