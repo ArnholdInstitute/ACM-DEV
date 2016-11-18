@@ -10,17 +10,16 @@ other satellite images. In addition to the convnet, I've provide files to
 construct the data.
 
 The files of interest are:
- - `cnn.py`: runs the convolutional neural network
+ - `cnn.py`: trains the convolutional neural network
+ - `cnn_estimation.py`: uses trained model for estimation
  - `data_cleaning.py`: a class to merges satellite images with population
    databases (shapefiles)
- - `data_cleaning_validation.py`: a class to turn satellite images into keras
-   ready data
- - `ee_data.py`: downloads the satellite images   
- - `do_training.py`: creates training dataset 
+ - `do_data_cleaning.py`: runs `data_cleaning.py` to create training dataset
+ - `validation.py`: class to create validation dataset
  - `do_validation.py`: creates validation data set
  - `do_postestimation.py`: converts satellite images to predictions 
+ - `estimates.ipynb`: generating estimates from predictions 
  
-
 In addition to the usual, the analysis relies on these packages 
 
 - [Keras](http://www.keras.io)
@@ -32,7 +31,5 @@ In addition to the usual, the analysis relies on these packages
 - [pyproj](https://github.com/jswhit/pyproj)
 - [parmap](https://parmap.readthedocs.org)
 - [h5py](http://www.h5py.org)
-
-
 
 
